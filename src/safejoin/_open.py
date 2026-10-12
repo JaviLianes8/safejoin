@@ -13,8 +13,9 @@ from typing import IO, Any
 from ._errors import InvalidPartError, SymlinkError, TraversalError
 from ._join import StrPath, SymlinkPolicy, safe_join
 from ._paths import canonical, relative_inside, resolved
+from ._rules import plain_text
 
-_LINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
+_LINK_ERRNOS = (errno.ELOOP, errno.EMLINK)
 
 
 def _flags(mode: str) -> tuple[int, str, bool]:
@@ -79,12 +80,14 @@ else:
             if exc.errno == errno.ENXIO:
                 raise InvalidPartError(f"{name!r} is not a regular file", part=part) from exc
             if exc.errno in _LINK_ERRNOS:
+                raise SymlinkError(f"{name!r} is a symlink", part=part) from exc
+            if exc.errno == errno.ENOTDIR:
                 try:
                     is_link = stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode)
-                except OSError:
-                    is_link = False
+                except FileNotFoundError:
+                    is_link = True  # it changed under us: treat as a swap
                 if is_link:
-                    raise SymlinkError(f"{name!r} became a symlink", part=part) from exc
+                    raise SymlinkError(f"{name!r} changed while opening", part=part) from exc
             raise
 
     def _platform_open(
@@ -133,23 +136,32 @@ def safe_open(
       makes the call fail with ``SymlinkError`` instead of escaping;
     * on Windows the file is opened and the OS is asked for the final path of the
       handle; a handle outside the base is closed and refused. Truncation for ``"w"``
-      happens only after that check. A racing attacker can at most make a create
-      leave an empty file elsewhere; no content outside the base is read, written or
-      truncated.
+      happens only after that check. An attacker who swaps a junction in between the
+      check and the open can still make the open itself reach the junction's target
+      (leave an empty file there, or connect to a named pipe) before it is refused;
+      no content outside the base is read, written or truncated through it.
 
     Only regular files are opened, so a FIFO or device planted in the base is refused
-    with ``InvalidPartError``. Missing parent directories are not created. ``mode``
+    with ``InvalidPartError``. Write modes refuse a file with more than one hard link,
+    because its other names may live outside the base; reads through a hard link are
+    not detected. Missing parent directories are not created. ``mode``
     accepts ``r``, ``w``, ``a`` or ``x`` with optional ``+`` and ``b`` or ``t``.
     """
     flags, view, truncate = _flags(mode)
     _check_text_args(view, encoding, errors, newline)
-    path = safe_join(base, *parts, resolve=True, symlinks=symlinks, windows_rules=windows_rules)
-    part = os.fspath(parts[-1]) if parts else None
-    safe_base = resolved(Path(os.fspath(base)))
+    base_text = plain_text(base, "base")
+    texts = [plain_text(item, "parts") for item in parts]
+    path = safe_join(base_text, *texts, symlinks=symlinks, windows_rules=windows_rules)
+    part = texts[-1] if texts else None
+    safe_base = resolved(Path(base_text))
     if not relative_inside(safe_base, path):
         raise InvalidPartError(f"{path} is the base directory itself, not a file", part=part)
+    if path.is_dir():
+        raise InvalidPartError(f"{path} is a directory, not a file", part=part)
     fd = _platform_open(safe_base, path, flags, permissions, symlinks, part)
     try:
+        if flags & (os.O_WRONLY | os.O_RDWR) and os.fstat(fd).st_nlink > 1:
+            raise InvalidPartError(f"{path} has other hard links; refusing to write", part=part)
         if truncate:
             os.ftruncate(fd, 0)
     except BaseException:
