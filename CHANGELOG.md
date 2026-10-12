@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Security
+
+- NUL bytes in a part or in the base are refused with `InvalidPartError`; 0.1
+  accepted them and could return a path containing NUL.
+- A `..` that climbs above the base is refused even when later parts come back down
+  (`../base/x`), which could leave the base when the base itself is a symlink.
+- On Windows (or anywhere with `windows_rules=True`), device names such as `CON`,
+  `nul.txt` and `COM1`, alternate data streams (`file.txt:stream`), names ending in a
+  dot or a space, forbidden characters and look-alike or best-fit characters that
+  become separators are refused. 0.1 accepted them.
+- Resolved mode now verifies its own result: a link left unresolved below the base
+  (a loop, an over-long path, an unreadable component) is refused with `SymlinkError`
+  instead of being trusted or surfacing as `RuntimeError` or `OSError`.
+- Resolved mode also applies the lexical check, so a name Windows maps to the device
+  namespace (`NUL`) is refused even with Windows rules off; `is_within` reports such a
+  target as outside.
+- Containment ignores the Win32 `\\?\` prefix on either side and treats any leftover
+  `..` as outside, which removes a false rejection and a lexical blind spot.
+
+- On Windows, resolved mode follows links below the base with `readlink` before
+  calling `Path.resolve()`, so a link to a named pipe, a device or a remote share is
+  refused without being opened or contacted.
+- Every untrusted input is read exactly once as a plain `str`, so a `str` subclass or
+  a path-like object that changes its answer cannot bypass the checks.
+
+### Added
+
+- Typed errors `AbsolutePartError`, `TraversalError`, `InvalidPartError` and
+  `SymlinkError`, all subclasses of `UnsafePathError`, with `.part` naming the
+  offending input and `.reason`.
+- `safe_join(..., symlinks="deny")` refuses any symlink or junction below the base;
+  `windows_rules=` turns Windows naming rules on or off explicitly.
+- `check_part` validates one untrusted part without the filesystem.
+- `safe_open` opens a regular file inside the base with `O_NOFOLLOW` descriptor walks
+  on POSIX and a final-path check on Windows, truncating only after the check, and
+  refuses to write to a file that has other hard links.
+- `member_parts`, `safe_member_path`, `link_target_parts` and `safe_link_target` for
+  zip and tar extraction.
+- `RESERVED_NAMES`, the Windows device names that are refused.
+- A `safejoin` command with `check`, `within`, `member` and `scan`; `scan` also
+  reports link chains through earlier symlink members and zip local header mismatches.
+- `GUIDE.md` with the threat model and the guarantee of each mode.
+
 ## [0.1.0]
 
 - First release.
