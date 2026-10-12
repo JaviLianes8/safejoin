@@ -28,16 +28,23 @@ This guide states what each function promises, in which mode, and what it does n
 4. The joined path is normalised lexically (`os.path.abspath`) and must be inside the
    lexical base. On Windows this also catches names that `GetFullPathName` sends to the
    device namespace, such as `NUL`.
-5. **Resolved mode** (`resolve=True`, default): base and joined path are resolved with
-   `Path.resolve()`, which follows symlinks and junctions, including dangling ones. The
-   result must be inside the resolved base, and every existing component below the base
-   is checked again with `lstat`: if one is still a link, or cannot be inspected, the
-   resolution did not finish (a loop, a permission error, an over-long path) and
-   `SymlinkError` is raised. A link that leads outside raises `TraversalError`.
-6. **`symlinks="deny"`**: every existing component below the base, in the path as
-   written, is checked with `lstat`; a symlink or a junction raises `SymlinkError`,
-   even when it points inside. Other Windows reparse points (cloud placeholders) are
-   treated as ordinary files.
+5. **`symlinks="deny"`**: every existing component below the base, in the path as
+   written and before any `..` is collapsed (so `lnk/../x` checks `lnk`), is checked
+   with `lstat`; a symlink or a junction raises `SymlinkError`, even when it points
+   inside. Other Windows reparse points (cloud placeholders) are treated as ordinary
+   files. This runs before anything is resolved.
+6. **Resolved mode** (`resolve=True`, default): on Windows, links below the base are
+   first followed lexically with `readlink`, which opens only the link itself; a link
+   whose target is outside the base (including a UNC share) raises `TraversalError` and
+   one that names a device (`\\.\pipe\...`) raises `SymlinkError`, before
+   `Path.resolve()` could open or connect to it. Then base and joined path are resolved
+   with `Path.resolve()`, which follows symlinks and junctions, including dangling ones.
+   The result must be inside the resolved base, and every existing component below the
+   base is checked again with `lstat`: if one is still a link, the resolution did not
+   finish (a loop, an over-long path) and `SymlinkError` is raised. A component that
+   cannot be inspected raises `SymlinkError`, or `InvalidPartError` when Windows refuses
+   the name itself (for example, longer than 255 characters). A link that leads outside
+   raises `TraversalError`.
 
 The returned path is absolute: resolved in resolved mode, lexical otherwise.
 
@@ -72,6 +79,11 @@ copied to Windows. They refuse:
 - characters that best-fit code page conversion turns into `/`, `\` or `:` (for
   example the yen sign in cp932 and the division slash in cp1252). A program that later
   passes the name through a narrow ("A") Windows API would otherwise see a separator.
+  The list is checked against the real converter for every ANSI code page Windows uses
+  as a system code page (874, 932, 936, 949, 950, 1250 to 1258) plus the OEM pages 437
+  and 850. Other OEM pages are only used by narrow file APIs after
+  `SetFileApisToOEM`, and are not covered: some of them map letters such as `Š` to `\`,
+  and refusing those letters would break ordinary names.
 
 ## `safe_open`
 
@@ -85,13 +97,17 @@ you pass), then:
 - **Windows**: opens the path, asks the OS for the final path of the handle with
   `GetFinalPathNameByHandleW`, and closes and refuses the handle unless that path is
   inside the resolved base (and, with `"deny"`, equal to the checked path).
-  Truncation for `"w"` happens only after the check. What remains: a racing attacker
-  who can swap a junction in the base between the check and the open can make a
-  create (`"w"`, `"a"`, `"x"`) leave an empty file at the junction's target. No
-  content outside the base is ever read, written or truncated.
+  Truncation for `"w"` happens only after the check. What remains: an attacker who
+  can swap a junction in the base between the check and the open can make the open
+  itself reach the junction's target before it is refused: a create (`"w"`, `"a"`,
+  `"x"`) may leave an empty file there, and a target that is a named pipe sees a
+  connection. No content outside the base is read, written or truncated through it.
 
-On both, only regular files are returned: a FIFO or device in the base raises
-`InvalidPartError` instead of blocking. Parent directories are not created.
+On both, only regular files are returned: a directory, a FIFO or a device raises
+`InvalidPartError` instead of blocking. Write modes refuse a file with more than one
+hard link, because its other names may be outside the base (otherwise `"w"` would
+truncate them too); reads through a hard link cannot be detected. Parent directories
+are not created.
 
 ## Archives
 
@@ -109,8 +125,11 @@ from its target, not from `a`.
 That lexical view cannot see links created by earlier members, so at extraction time
 use `safe_member_path` for every write and `safe_link_target` for every link. Both
 resolve against what is already on disk, the way PEP 706's `data` filter does.
-`safejoin scan` runs the lexical checks over a whole zip or tar file and also reports
-device and FIFO members.
+`safejoin scan` runs these checks over a whole zip or tar file without extracting it.
+It also reports device and FIFO members, symlinks to the archive root, any member or
+link target whose path passes through an earlier symlink member (a chain such as `d`
+-> `.`, `d/l` -> `..`, then `l/x`), and zip members whose local header name differs
+from the central directory name (streaming unzip tools read the local one).
 
 ## What safejoin does not do
 
@@ -118,7 +137,8 @@ device and FIFO members.
 - It cannot protect a path you use later with plain `open()`: the filesystem may
   change in between. Use `safe_open`, or open relative to directory descriptors
   yourself.
-- It cannot detect hard links: they are ordinary directory entries.
+- It cannot tell a hard link from an ordinary file by path. `safe_open` refuses to
+  write to a file with several links, but `safe_join` and reads cannot detect them.
 - Case-insensitive or normalising filesystems (macOS, Windows) may map two different
   names to one file. That never moves a file outside the base, but deny lists keyed on
   names are not reliable there.

@@ -95,6 +95,9 @@ Refused, with the test that pins it:
   below the base with `symlinks="deny"`. Real links are created in a temp directory;
   junctions with `_winapi.CreateJunction`, symlinks with `os.symlink` (skipped with a
   reason where the OS forbids them).
+- On Windows, links below the base are followed with `readlink` before resolving, so a
+  link to a named pipe or a remote share is refused without being opened
+  (`tests/test_prescreen.py`).
 - A resolution that stops half way (a loop, a component that cannot be inspected):
   the resolved result is walked again and any link still present is refused.
 
@@ -110,6 +113,8 @@ Not covered, by design:
   `safe_open`, which closes that window on POSIX with `O_NOFOLLOW` and on Windows by
   checking the final path of the opened handle. See the guide for what remains.
 - **Hard links.** A hard link is indistinguishable from an ordinary file by path.
+  `safe_open` refuses to write to a file with several links; reads cannot detect them.
+- **OEM code pages** other than 437 and 850 for best-fit look-alikes; see the guide.
 
 ## Background
 
