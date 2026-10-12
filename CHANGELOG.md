@@ -27,6 +27,12 @@ All notable changes to this project are documented here. The format follows
 - Containment ignores the Win32 `\\?\` prefix on either side and treats any leftover
   `..` as outside, which removes a false rejection and a lexical blind spot.
 
+- On Windows, resolved mode follows links below the base with `readlink` before
+  calling `Path.resolve()`, so a link to a named pipe, a device or a remote share is
+  refused without being opened or contacted.
+- Every untrusted input is read exactly once as a plain `str`, so a `str` subclass or
+  a path-like object that changes its answer cannot bypass the checks.
+
 ### Added
 
 - Typed errors `AbsolutePartError`, `TraversalError`, `InvalidPartError` and
@@ -36,11 +42,13 @@ All notable changes to this project are documented here. The format follows
   `windows_rules=` turns Windows naming rules on or off explicitly.
 - `check_part` validates one untrusted part without the filesystem.
 - `safe_open` opens a regular file inside the base with `O_NOFOLLOW` descriptor walks
-  on POSIX and a final-path check on Windows, truncating only after the check.
+  on POSIX and a final-path check on Windows, truncating only after the check, and
+  refuses to write to a file that has other hard links.
 - `member_parts`, `safe_member_path`, `link_target_parts` and `safe_link_target` for
   zip and tar extraction.
 - `RESERVED_NAMES`, the Windows device names that are refused.
-- A `safejoin` command with `check`, `within`, `member` and `scan`.
+- A `safejoin` command with `check`, `within`, `member` and `scan`; `scan` also
+  reports link chains through earlier symlink members and zip local header mismatches.
 - `GUIDE.md` with the threat model and the guarantee of each mode.
 
 ## [0.1.0]
