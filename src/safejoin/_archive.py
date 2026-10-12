@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from ._errors import AbsolutePartError, InvalidPartError, TraversalError
 from ._join import StrPath, SymlinkPolicy, safe_join
 from ._paths import contains, first_link_below, resolved
-from ._rules import check_part, is_rooted
+from ._rules import check_part, is_rooted, plain_text
 
 
-def _screen(text: object, what: str) -> str:
-    if not isinstance(text, str):
-        raise TypeError(f"{what} must be str, not {type(text).__name__}")
+def _screen(value: object, what: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{what} must be str, not {type(value).__name__}")
+    text = str.__str__(value)
     if "\x00" in text:
         raise InvalidPartError(f"{what} {text!r} holds a NUL byte", part=text)
     if is_rooted(text, True):
@@ -105,13 +105,15 @@ def safe_link_target(base: StrPath, member_name: str, target: str, *, hard: bool
     way PEP 706's ``data`` filter does, and refuses it unless it lands inside the
     resolved base with no unresolved link left below it.
     """
+    member_name, target = _screen(member_name, "member name"), _screen(target, "link target")
     link_target_parts(member_name, target, hard=hard)
-    safe_base = resolved(Path(os.fspath(base)))
+    base_text = plain_text(base, "base")
+    safe_base = resolved(Path(base_text))
     member = member_parts(member_name)
     if hard or len(member) == 1:
         start = safe_base
     else:
-        start = safe_join(base, *member[:-1], windows_rules=True)
+        start = safe_join(base_text, *member[:-1], windows_rules=True)
     landing = resolved(start / target.replace("\\", "/"), target)
     if not contains(safe_base, landing):
         raise TraversalError(

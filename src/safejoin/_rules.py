@@ -27,6 +27,18 @@ _BEST_FIT_SEPARATORS = frozenset("\u00a5\u00b4\u0589\u2044\u20a9\u2215\u2216\u22
 _NORMALISED_DANGER = frozenset('/\\:<>"|?*')
 
 
+def plain_text(value: object, what: str) -> str:
+    """Return ``os.fspath(value)`` as an exact ``str``, so no subclass can lie later.
+
+    A ``str`` subclass could override ``split`` or ``replace``, and a path-like
+    object could answer differently on each call; both are read exactly once here.
+    """
+    text = os.fspath(value)  # type: ignore[call-overload]
+    if not isinstance(text, str):
+        raise TypeError(f"{what} must be str or os.PathLike[str], not {type(text).__name__}")
+    return str.__str__(text)
+
+
 def windows_rules_default(windows_rules: bool | None) -> bool:
     """Resolve ``None`` to the platform default: on for Windows, off elsewhere."""
     if windows_rules is None:
@@ -87,9 +99,7 @@ def check_part(part: str | os.PathLike[str], *, windows_rules: bool | None = Non
     space, or holds a forbidden or look-alike character. ``..`` is not refused here:
     it is legal inside the base and ``safe_join`` decides where it lands.
     """
-    text = os.fspath(part)
-    if not isinstance(text, str):
-        raise TypeError(f"parts must be str or os.PathLike[str], not {type(text).__name__}")
+    text = plain_text(part, "parts")
     if "\x00" in text:
         raise InvalidPartError(f"untrusted part {text!r} holds a NUL byte", part=text)
     windows = windows_rules_default(windows_rules)

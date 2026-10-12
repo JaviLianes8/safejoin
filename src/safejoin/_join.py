@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Literal, Union
 
 from ._errors import InvalidPartError, SymlinkError, TraversalError
-from ._paths import absolute, contains, first_link_below, resolved
-from ._rules import check_part, split_components, windows_rules_default
+from ._paths import (
+    absolute,
+    contains,
+    first_link_as_written,
+    first_link_below,
+    relative_inside,
+    resolved,
+)
+from ._prescreen import prescreen
+from ._rules import check_part, plain_text, split_components, windows_rules_default
 
 StrPath = Union[str, "os.PathLike[str]"]
 SymlinkPolicy = Literal["allow_inside", "deny"]
@@ -18,9 +27,7 @@ _DEVICE_PREFIX = "\\\\.\\"
 
 
 def _base_path(base: StrPath) -> Path:
-    text = os.fspath(base)
-    if not isinstance(text, str):
-        raise TypeError(f"base must be str or os.PathLike[str], not {type(text).__name__}")
+    text = plain_text(base, "base")
     if "\x00" in text:
         raise InvalidPartError(f"base {text!r} holds a NUL byte")
     return Path(text)
@@ -47,6 +54,8 @@ def _settle(base: Path, safe_base: Path, path: Path, resolve: bool) -> Path:
     lexical = absolute(path)
     if not contains(absolute(base), lexical):
         raise TraversalError(f"joined path {lexical} escapes base {absolute(base)}")
+    if resolve and sys.platform == "win32":
+        prescreen(base, safe_base, relative_inside(absolute(base), lexical) or (), None)
     settled = resolved(path) if resolve else lexical
     if not contains(safe_base, settled):
         raise TraversalError(f"joined path {settled} escapes base {safe_base}")
@@ -64,7 +73,7 @@ def _culprit(base: Path, safe_base: Path, texts: list[str], resolve: bool) -> st
         current = current / text
         try:
             _settle(base, safe_base, current, resolve)
-        except (TraversalError, SymlinkError):
+        except (TraversalError, SymlinkError, InvalidPartError):
             return text
     return texts[-1] if texts else None
 
@@ -99,34 +108,30 @@ def safe_join(
         raise ValueError(f"symlinks must be one of {_POLICIES}, not {symlinks!r}")
     base_path = _base_path(base)
     windows = windows_rules_default(windows_rules)
-    texts = [os.fspath(part) for part in parts]
+    texts = [plain_text(part, "parts") for part in parts]
     for text in texts:
         check_part(text, windows_rules=windows)
     _check_depth(texts, windows)
     candidate = base_path.joinpath(*texts)
+    if symlinks == "deny":
+        _deny_links(base_path, texts)
     safe_base = resolved(base_path) if resolve else absolute(base_path)
     try:
-        safe_candidate = _settle(base_path, safe_base, candidate, resolve)
-    except (TraversalError, SymlinkError) as exc:
-        exc.part = _culprit(base_path, safe_base, texts, resolve)
+        return _settle(base_path, safe_base, candidate, resolve)
+    except (TraversalError, SymlinkError, InvalidPartError) as exc:
+        if exc.part is None:
+            exc.part = _culprit(base_path, safe_base, texts, resolve)
         raise
-    if symlinks == "deny":
-        link = first_link_below(absolute(base_path), absolute(candidate))
-        if link is not None:
-            raise SymlinkError(
-                f"link {link} is refused by symlinks='deny'", part=_owner(base_path, texts, link)
-            )
-    return safe_candidate
 
 
-def _owner(base: Path, texts: list[str], link: Path) -> str | None:
-    """Return the part whose components first reach ``link``."""
-    current = absolute(base)
+def _deny_links(base: Path, texts: list[str]) -> None:
+    """Refuse any existing link met while walking the parts as written, ``..`` included."""
+    names: list[str] = []
     for text in texts:
-        current = absolute(current / text)
-        if contains(link, current):
-            return text
-    return None
+        names += split_components(text, False)
+        link = first_link_as_written(absolute(base), names, text)
+        if link is not None:
+            raise SymlinkError(f"link {link} is refused by symlinks='deny'", part=text)
 
 
 def is_within(base: StrPath, target: StrPath, *, resolve: bool = True) -> bool:
@@ -137,7 +142,7 @@ def is_within(base: StrPath, target: StrPath, *, resolve: bool = True) -> bool:
     outside. With ``resolve=False`` the comparison is lexical and never touches the
     filesystem. A NUL byte in either path makes the answer ``False``.
     """
-    base_text, target_text = os.fspath(base), os.fspath(target)
+    base_text, target_text = plain_text(base, "base"), plain_text(target, "target")
     if "\x00" in base_text or "\x00" in target_text:
         return False
     lexical = absolute(Path(target_text))
@@ -147,6 +152,9 @@ def is_within(base: StrPath, target: StrPath, *, resolve: bool = True) -> bool:
         return False
     try:
         safe_base = resolved(Path(base_text))
+        names = relative_inside(absolute(Path(base_text)), lexical)
+        if sys.platform == "win32" and names is not None:
+            prescreen(Path(base_text), safe_base, names, None)
         safe_target = resolved(Path(target_text))
         if not contains(safe_base, safe_target):
             return False

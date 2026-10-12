@@ -12,7 +12,7 @@ from ._errors import InvalidPartError, SymlinkError, TraversalError
 # points). Other reparse points, such as cloud placeholders, are ordinary files.
 _NAME_SURROGATE = 0x20000000
 # ERROR_INVALID_NAME and ERROR_BAD_PATHNAME: Windows refuses the name itself.
-_INVALID_NAME_ERRORS = (123, 161)
+INVALID_NAME_ERRORS = (123, 161)
 
 
 def canonical(path: Path) -> Path:
@@ -65,12 +65,27 @@ def is_link(info: os.stat_result) -> bool:
     return bool(getattr(info, "st_reparse_tag", 0) & _NAME_SURROGATE)
 
 
+def lstat_or_none(path: Path, part: str | None = None) -> os.stat_result | None:
+    """``lstat`` that returns ``None`` for a missing path and raises typed errors.
+
+    A name Windows refuses raises ``InvalidPartError``; any other failure to inspect
+    an existing path raises ``SymlinkError``, because the path cannot be verified.
+    """
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if getattr(exc, "winerror", None) in INVALID_NAME_ERRORS:
+            raise InvalidPartError(f"{path} is not a valid name", part=part) from exc
+        raise SymlinkError(f"cannot inspect {path}: {exc}", part=part) from exc
+
+
 def first_link_below(base: Path, target: Path, part: str | None = None) -> Path | None:
     """Return the first existing component strictly below base that is a link.
 
     Components are checked with ``lstat`` from the base down and the walk stops at
-    the first one that does not exist. A component that exists but cannot be
-    inspected raises ``SymlinkError``: the path cannot be verified.
+    the first one that does not exist.
     """
     parts = relative_inside(base, target)
     if parts is None:
@@ -78,14 +93,29 @@ def first_link_below(base: Path, target: Path, part: str | None = None) -> Path 
     current = canonical(base)
     for name in parts:
         current = current / name
-        try:
-            info = os.lstat(current)
-        except (FileNotFoundError, NotADirectoryError):
+        info = lstat_or_none(current, part)
+        if info is None:
             return None
-        except OSError as exc:
-            if getattr(exc, "winerror", None) in _INVALID_NAME_ERRORS:
-                raise InvalidPartError(f"{current} is not a valid name", part=part) from exc
-            raise SymlinkError(f"cannot inspect {current}: {exc}", part=part) from exc
         if is_link(info):
+            return current
+    return None
+
+
+def first_link_as_written(base: Path, names: list[str], part: str | None = None) -> Path | None:
+    """Like ``first_link_below`` but over components as written, ``..`` included.
+
+    ``lnk/../x`` checks ``lnk`` before stepping back, so a link that is only passed
+    through still counts. Missing components are skipped, not a stopping point.
+    """
+    current = canonical(base)
+    for name in names:
+        if name in ("", "."):
+            continue
+        if name == "..":
+            current = current.parent
+            continue
+        current = current / name
+        info = lstat_or_none(current, part)
+        if info is not None and is_link(info):
             return current
     return None

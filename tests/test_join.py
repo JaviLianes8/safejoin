@@ -175,3 +175,41 @@ def test_windows_rules_can_be_forced_anywhere(tmp_path: Path) -> None:
     for part in ["CON", "a:b", "x.", "..\\..\\x"]:
         with pytest.raises(UnsafePathError):
             safe_join(tmp_path, part, windows_rules=True)
+
+
+class _LyingStr(str):
+    """A str subclass whose helpers pretend the text is harmless."""
+
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        return ["harmless"]
+
+    def replace(self, *args: object, **kwargs: object) -> str:
+        return "harmless"
+
+    def __contains__(self, item: object) -> bool:
+        return False
+
+
+class _FlipFlop:
+    """A path-like object that answers safely once, then with an escape."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __fspath__(self) -> str:
+        self.calls += 1
+        return "safe" if self.calls == 1 else "../../escape"
+
+
+def test_a_lying_str_subclass_cannot_fool_the_checks(tmp_path: Path) -> None:
+    for resolve in (True, False):
+        with pytest.raises(UnsafePathError):
+            safe_join(tmp_path, _LyingStr("../../x"), resolve=resolve)
+        with pytest.raises(UnsafePathError):
+            safe_join(tmp_path, _LyingStr("a\x00b"), resolve=resolve)
+
+
+def test_a_path_like_part_is_read_exactly_once(tmp_path: Path) -> None:
+    part = _FlipFlop()
+    assert safe_join(tmp_path, part) == (tmp_path / "safe").resolve()
+    assert part.calls == 1
